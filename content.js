@@ -29,21 +29,24 @@ const mapNodesAndText = (element, map) => {
 
 // import BhashiniTranslator from './utils/translate';
 class BhashiniTranslator {
-  #pipelineData;
-  #apiKey;
+  #pipelineData1;
+  #pipelineData2;
+  #apiKey1;
+  #apiKey2;
   #userID;
   #sourceLanguage;
   #targetLanguage;
   failcount = 0;
-  constructor(apiKey, userID) {
-    if (!apiKey || !userID) {
+  constructor(apiKey1, apiKey2, userID) {
+    if (!apiKey1  || !apiKey2 || !userID) {
       throw new Error("Invalid credentials");
     }
-    this.#apiKey = apiKey;
+    this.#apiKey1 = apiKey1;
+    this.#apiKey2 = apiKey2;
     this.#userID = userID;
   }
 
-  async #getPipeline(sourceLanguage, targetLanguage) {
+  async #getPipeline1(sourceLanguage, targetLanguage) {
     this.#sourceLanguage = sourceLanguage;
     this.#targetLanguage = targetLanguage;
     const apiUrl =
@@ -52,7 +55,7 @@ class BhashiniTranslator {
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
-        ulcaApiKey: this.#apiKey,
+        ulcaApiKey: this.#apiKey1,
         userID: this.#userID,
         "Content-Type": "application/json",
       },
@@ -75,19 +78,53 @@ class BhashiniTranslator {
     });
 
     const data = await response.json();
-    this.#pipelineData = data;
+    this.#pipelineData1 = data;
+  }
+  async #getPipeline2(sourceLanguage, targetLanguage) {
+    this.#sourceLanguage = sourceLanguage;
+    this.#targetLanguage = targetLanguage;
+    const apiUrl =
+      "https://meity-auth.ulcacontrib.org/ulca/apis/v0/model/getModelsPipeline";
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        ulcaApiKey: this.#apiKey2,
+        userID: this.#userID,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        pipelineTasks: [
+          {
+            taskType: "translation",
+            config: {
+              language: {
+                sourceLanguage,
+                targetLanguage,
+              },
+            },
+          },
+        ],
+        pipelineRequestConfig: {
+          pipelineId: "643930aa521a4b1ba0f4c41d",
+        },
+      }),
+    });
+
+    const data = await response.json();
+    this.#pipelineData2 = data;
   }
 
-  async #translate(content, sourceLanguage, targetLanguage) {
-    if (!this.#pipelineData) {
+  async #translate1(content, sourceLanguage, targetLanguage) {
+    if (!this.#pipelineData1) {
       throw new Error("pipelineData not found");
     }
     const callbackURL =
-      this.#pipelineData.pipelineInferenceAPIEndPoint.callbackUrl;
+      this.#pipelineData1.pipelineInferenceAPIEndPoint.callbackUrl;
     const inferenceApiKey =
-      this.#pipelineData.pipelineInferenceAPIEndPoint.inferenceApiKey.value;
+      this.#pipelineData1.pipelineInferenceAPIEndPoint.inferenceApiKey.value;
     const serviceId =
-      this.#pipelineData.pipelineResponseConfig[0].config.serviceId;
+      this.#pipelineData1.pipelineResponseConfig[0].config.serviceId;
     let resp;
     try {
       resp = await fetch(callbackURL, {
@@ -124,42 +161,113 @@ class BhashiniTranslator {
           "Failed getting a response from the server after 10 tries"
         );
       this.failcount++;
-      this.#getPipeline(sourceLanguage, targetLanguage);
-      resp = await this.#translate(content, sourceLanguage, targetLanguage);
+      this.#getPipeline1(sourceLanguage, targetLanguage);
+      resp = await this.#translate1(content, sourceLanguage, targetLanguage);
     }
     this.failcount = 0;
     return resp.pipelineResponse[0].output[0].target;
   }
-
+  async #translate2(content, sourceLanguage, targetLanguage) {
+    if (!this.#pipelineData2) {
+      throw new Error("pipelineData not found");
+    }
+    const callbackURL =
+      this.#pipelineData2.pipelineInferenceAPIEndPoint.callbackUrl;
+    const inferenceApiKey =
+      this.#pipelineData2.pipelineInferenceAPIEndPoint.inferenceApiKey.value;
+    const serviceId =
+      this.#pipelineData2.pipelineResponseConfig[0].config.serviceId;
+    let resp;
+    try {
+      resp = await fetch(callbackURL, {
+        method: "POST",
+        headers: {
+          Authorization: inferenceApiKey,
+          "Content-type": "application/json",
+        },
+        body: JSON.stringify({
+          pipelineTasks: [
+            {
+              taskType: "translation",
+              config: {
+                language: {
+                  sourceLanguage,
+                  targetLanguage,
+                },
+                serviceId,
+              },
+            },
+          ],
+          inputData: {
+            input: [
+              {
+                source: content,
+              },
+            ],
+          },
+        }),
+      }).then((res) => res.json());
+    } catch (e) {
+      if (this.failcount > 10)
+        throw new Error(
+          "Failed getting a response from the server after 10 tries"
+        );
+      this.failcount++;
+      this.#getPipeline2(sourceLanguage, targetLanguage);
+      resp = await this.#translate2(content, sourceLanguage, targetLanguage);
+    }
+    this.failcount = 0;
+    return resp.pipelineResponse[0].output[0].target;
+  }
+    ///
   async translateDOM(dom, sourceLanguage, targetLanguage) {
     if (
-      !this.#pipelineData ||
+      !this.#pipelineData1 || !this.#pipelineData2 ||
       this.#sourceLanguage !== sourceLanguage ||
       this.#targetLanguage !== targetLanguage
     ) {
-      await this.#getPipeline(sourceLanguage, targetLanguage);
+      await this.#getPipeline1(sourceLanguage, targetLanguage);
+      await this.#getPipeline2(sourceLanguage, targetLanguage);
     }
+  
     const map = new Map();
     mapNodesAndText(dom, map);
-    const promises = [];
-
-    for (const [text, nodes] of map) {
-      const promise = this.#translate(
-        text,
-        this.#sourceLanguage,
-        this.#targetLanguage
-      ).then((translated) => {
-        nodes.forEach((node) => {
-          node.textContent = translated;
+  
+    const batchedTexts = Array.from(map.keys());
+  
+    // Split the array into batches (e.g., batches of 10)
+    const batchSize = 10;
+    const batches = [];
+    for (let i = 0; i < batchedTexts.length; i += batchSize) {
+      batches.push(batchedTexts.slice(i, i + batchSize));
+    }
+  
+    const promises = batches.map(async (batch, index) => {
+      // Combine texts in the batch
+      const combinedText = batch.join(" ");
+  
+      // Use translate1 for odd-indexed batches and translate2 for even-indexed batches
+      const translated =
+        index % 2 === 0
+          ? await this.#translate1(combinedText, sourceLanguage, targetLanguage)
+          : await this.#translate2(combinedText, sourceLanguage, targetLanguage);
+  
+      // Update each node in the batch with its corresponding translated text
+      batch.forEach((text) => {
+        map.get(text).forEach((node) => {
+          if (node.textContent.trim() === text.trim()) {
+            // Check if the node's content matches the original text
+            node.textContent = translated;
+          }
         });
       });
-
-      promises.push(promise);
-    }
-
+    });
+  
     await Promise.all(promises);
+  
     return dom;
   }
+    ///
 
   async translateHTMLstring(html, sourceLanguage, targetLanguage) {
     const dom = htmlStringToDOM(html);
@@ -178,6 +286,7 @@ class BhashiniTranslator {
 
 const Bhashini = new BhashiniTranslator(
   "019a562b7f-bb9c-4440-8b79-11b170353130",
+  "24b1feccfb-e99c-4bd0-81e3-d7b875eea16e",
   "48115d2ab7f24c55b8b29af34806050c"
 );
 
