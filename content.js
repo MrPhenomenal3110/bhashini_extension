@@ -2,7 +2,7 @@ const htmlStringToDOM = (html) => {
   const parser = new DOMParser();
   return parser.parseFromString(html, "text/html").body;
 };
-const IGNORE_NODES = ["SCRIPT", "STYLE"];
+const IGNORE_NODES = ["SCRIPT", "STYLE","IMG"];
 
 const mapNodesAndText = (element, map) => {
   if (
@@ -34,6 +34,13 @@ class BhashiniTranslator {
   #userID;
   #sourceLanguage;
   #targetLanguage;
+  time = {
+    "pipelineCalls": [],
+    "translate": [],
+    "mapping": [],
+    "DOMupdation": [],
+    "totalTimeTaken": [],
+  };
   failcount = 0;
   constructor(apiKey, userID) {
     if (!apiKey || !userID) {
@@ -49,6 +56,7 @@ class BhashiniTranslator {
     const apiUrl =
       "https://meity-auth.ulcacontrib.org/ulca/apis/v0/model/getModelsPipeline";
 
+    const pipelineStart = performance.now();
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
@@ -76,9 +84,23 @@ class BhashiniTranslator {
 
     const data = await response.json();
     this.#pipelineData = data;
+    const pipelineEnd = performance.now();
+    const pipelineTime = pipelineEnd - pipelineStart;
+    this.time.pipelineCalls.push(pipelineTime);
   }
 
-  async #translate(content, sourceLanguage, targetLanguage) {
+  async translateHTMLstring(html, sourceLanguage, targetLanguage) {
+    const dom = htmlStringToDOM(html);
+    const translated = await this.translateDOM(
+      dom,
+      sourceLanguage,
+      targetLanguage
+    );
+    return translated;
+  }
+
+
+  async #translate(contents, sourceLanguage, targetLanguage) {
     if (!this.#pipelineData) {
       throw new Error("pipelineData not found");
     }
@@ -89,7 +111,14 @@ class BhashiniTranslator {
     const serviceId =
       this.#pipelineData.pipelineResponseConfig[0].config.serviceId;
     let resp;
+
+
     try {
+      // making an input array
+      const inputArray = contents.map((content) => ({
+        source: content,
+      }));
+
       resp = await fetch(callbackURL, {
         method: "POST",
         headers: {
@@ -110,11 +139,7 @@ class BhashiniTranslator {
             },
           ],
           inputData: {
-            input: [
-              {
-                source: content,
-              },
-            ],
+            input: inputArray,
           },
         }),
       }).then((res) => res.json());
@@ -125,11 +150,15 @@ class BhashiniTranslator {
         );
       this.failcount++;
       this.#getPipeline(sourceLanguage, targetLanguage);
-      resp = await this.#translate(content, sourceLanguage, targetLanguage);
+      resp = await this.#translate(contents, sourceLanguage, targetLanguage);
     }
     this.failcount = 0;
-    return resp.pipelineResponse[0].output[0].target;
+    return resp.pipelineResponse[0].output;
   }
+
+
+  // the translate dom function 
+
 
   async translateDOM(dom, sourceLanguage, targetLanguage) {
     if (
@@ -139,36 +168,104 @@ class BhashiniTranslator {
     ) {
       await this.#getPipeline(sourceLanguage, targetLanguage);
     }
-    const map = new Map();
-    mapNodesAndText(dom, map);
-    const promises = [];
 
-    for (const [text, nodes] of map) {
-      const promise = this.#translate(
-        text,
+    const map = new Map();
+
+    const mappingStart = performance.now();
+
+    mapNodesAndText(dom, map);
+
+    const mappingEnd = performance.now();
+
+    const mappingTime = mappingEnd - mappingStart;
+
+    this.time.mapping.push(mappingTime);
+
+    const batchedTexts = Array.from(map.keys());
+
+    // Split the array into batches (e.g., batches of 10)
+    const batchSize = 20;
+    const batches = [];
+    for (let i = 0; i < batchedTexts.length; i += batchSize) {
+      batches.push(batchedTexts.slice(i, i + batchSize));
+    }
+    // console.log(batches);
+
+    const promises = batches.map(async (batch) => {
+      // Combine texts in the batch
+      const combinedText = batch;
+      const translationStart = performance.now();
+
+      const translated = await this.#translate(
+        combinedText,
         this.#sourceLanguage,
         this.#targetLanguage
-      ).then((translated) => {
-        nodes.forEach((node) => {
-          node.textContent = translated;
+      );
+
+      const translationEnd = performance.now();
+
+      const translationTime = translationEnd - translationStart;
+      this.time.translate.push(translationTime);
+
+      // Update each node in the batch with its corresponding translated text
+
+      batch.forEach((text, index) => {
+        map.get(text).forEach((node) => {
+          const DOMupdationStart = performance.now();
+          if (node.textContent.trim() === text.trim()) {
+            // Check if the node's content matches the original text
+            node.textContent = " "+translated[index].target+" ";
+          }
+          const DOMupdationEnd = performance.now();
+          const DOMupdationTime = DOMupdationEnd - DOMupdationStart;
+          this.time.DOMupdation.push(DOMupdationTime);
         });
       });
 
-      promises.push(promise);
-    }
+    });
 
+    const totalStart = performance.now();
     await Promise.all(promises);
-    return dom;
-  }
+    const totalEnd = performance.now();
 
-  async translateHTMLstring(html, sourceLanguage, targetLanguage) {
-    const dom = htmlStringToDOM(html);
-    const translated = await this.translateDOM(
-      dom,
-      sourceLanguage,
-      targetLanguage
-    );
-    return translated;
+    const total = totalEnd - totalStart;
+    this.time.totalTimeTaken.push(total);
+
+    const translation = this.time.translate.length;
+
+    const translateTimeArray = this.time.translate;
+    for(let i = translateTimeArray.length-1; i >= 1; i--){
+      translateTimeArray[i] = translateTimeArray[i] - translateTimeArray[i-1];
+    }
+    const pipelineTIme = this.time.pipelineCalls[0];
+    const domTask = this.time.DOMupdation[0];
+    const mapping = this.time.mapping[0];
+    translateTimeArray.push((-1)*pipelineTIme);
+    translateTimeArray.push((-1)*domTask);
+    translateTimeArray.push((-1)*mapping);
+    this.time.translate = translateTimeArray;
+
+    const totalTime = Object.keys(this.time).reduce((acc, key) => {
+      const sum = this.time[key].reduce((total, value) => total + value, 0);
+      acc[key] = sum;
+      return acc;
+    }, {});
+
+    // Map the sums with their respective call headers
+    var result = Object.keys(totalTime).map(key => ({
+      callHeader: key,
+      totalTime: totalTime[key]
+    }));  
+    console.log(translation);
+    console.log(result);
+    console.log(this.time);
+    var translateTime;
+    const translationArray = this.time.translate;
+
+    translationArray.forEach((element) => {
+      translateTime = translateTime + element;
+    })
+    return dom;
   }
 }
 
@@ -192,7 +289,6 @@ chrome.runtime.onMessage.addListener(async function (
       request.sourceLanguage,
       request.targetLanguage
     );
-
-    console.log("response", response);
+    // console.log("response", response);
   }
 });
